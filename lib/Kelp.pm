@@ -12,7 +12,7 @@ use Plack::Util;
 use Kelp::Request;
 use Kelp::Response;
 
-our $VERSION = 0.4570;
+our $VERSION = '0.457_01';
 
 # Basic attributes
 attr -host => hostname;
@@ -142,31 +142,22 @@ sub psgi {
 
         # Go over the entire route chain
         for my $route (@$match) {
-            my $to = $route->to;
+            $req->named( $route->named );
 
-            # Check if the destination is valid
-            if ( ref($to) && ref($to) ne 'CODE' || !$to ) {
-                die 'Invalid destination for ' . $req->path;
-            }
-
-            # Check if the destination function exists
-            if ( !ref($to) && !exists &$to ) {
-                die sprintf( 'Route not found %s for %s', $to, $req->path );
-            }
+            my $data = try {
+                $self->routes->dispatch( $route, $self );
+            } catch {
+                die "Route for path '", $req->path, "' failed: $_";
+            };
 
             # Log info about the route
             if ( $self->can('logger') ) {
                 $self->logger(
                     'info',
                     sprintf( "%s - %s %s - %s",
-                        $req->address, $req->method, $req->path, $to )
+                        $req->address, $req->method, $req->path, $route->to )
                 );
             }
-
-            # Eval the destination code
-            my $code = ref $to eq 'CODE' ? $to : \&{$to};
-            $req->named( $route->named );
-            my $data = $code->( $self, @{ $route->param } );
 
             # Is it a bridge? Bridges must return a true value
             # to allow the rest of the routes to run.

@@ -7,10 +7,11 @@ use Kelp::Routes::Pattern;
 use Plack::Util;
 use Class::Inspector;
 
-attr base   => '';
-attr routes => sub { [] };
-attr cache  => sub { {} };
-attr names  => sub { {} };
+attr base                => '';
+attr routes              => sub { [] };
+attr cache               => sub { {} };
+attr names               => sub { {} };
+attr use_method_dispatch => 0;
 
 sub add {
     my ( $self, $pattern, $descr ) = @_;
@@ -153,6 +154,33 @@ sub match {
       grep { $_->match( $path, $method ) } @$routes;
 
     return $self->cache->{$key} = \@processed;
+}
+
+sub dispatch {
+    my $self = shift;
+    my $match = shift or croak "no route pattern instance supplied";
+    my $app = shift or croak "no app supplied";
+  
+    my $to = $match->to or croak 'No destination defined';
+    my $param = $match->param;
+
+    my $code;
+    if (my $ref = ref($to)) {
+        $ref eq 'CODE' or croak 'Invalid destination';
+        $code = $to;
+    } else {
+        if ($self->use_method_dispatch && $to =~ /^(.+)::(\w+)$/) {
+            my ($controller, $action) = ($1, $2);
+            my $code = $controller->can($action)
+                or croak "Controller '$controller' doesn't provide '$action'";
+            return $controller->$action($app, @$param);
+        }
+
+        exists &$to or croak "Route not found for '$to'";
+        $code = \&{ $to };
+    }
+
+    return $code->($app, @$param);
 }
 
 1;
