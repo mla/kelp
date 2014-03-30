@@ -184,7 +184,7 @@ sub dispatch {
             my $code = $controller->can($action)
                 or croak "Controller '$controller' doesn't provide '$action'";
             bless $app, $controller;
-            return $app->$action(@$param);
+            return $code->($app, @$param);
         }
 
         exists &$to or croak "Route not found for '$to'";
