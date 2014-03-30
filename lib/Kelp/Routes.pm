@@ -7,9 +7,11 @@ use Kelp::Routes::Pattern;
 use Plack::Util;
 use Class::Inspector;
 
-attr base   => '';
-attr routes => sub { [] };
-attr names  => sub { {} };
+attr base                => '';
+attr routes              => sub { [] };
+attr names               => sub { {} };
+attr use_method_dispatch => 0;
+
 
 # Cache
 attr _CACHE => sub { {} };
@@ -181,7 +183,8 @@ sub dispatch {
             my ($controller, $action) = ($1, $2);
             my $code = $controller->can($action)
                 or croak "Controller '$controller' doesn't provide '$action'";
-            return $controller->$action($app, @$param);
+            bless $app, $controller;
+            return $app->$action(@$param);
         }
 
         exists &$to or croak "Route not found for '$to'";

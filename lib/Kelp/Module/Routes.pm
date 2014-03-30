@@ -1,7 +1,5 @@
 package Kelp::Module::Routes;
 
-use strict;
-use warnings;
 use Plack::Util ();
 use Kelp::Base 'Kelp::Module';
 
