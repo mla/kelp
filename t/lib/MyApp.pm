@@ -7,7 +7,7 @@ sub before_finalize {
     $self->res->header( 'X-Test', 'MyApp' );
 }
 
-sub response {
+sub build_response {
     my $self = shift;
     MyApp::Response->new( app => $self );
 }
@@ -18,6 +18,9 @@ sub build {
     $r->add( "/test", sub { "OK" } );
     $r->add( "/greet/:name", "routes#greet");
     $r->add( "/bye/:name", "Routes2::goodbye");
+
+    # Controller routes
+    $r->add("/blessed", "blessed");
 }
 
 1;

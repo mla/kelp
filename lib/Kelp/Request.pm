@@ -6,7 +6,7 @@ use Encode;
 use Carp;
 use Try::Tiny;
 
-attr -app => sub { confess "app is required" };
+attr -app => sub { croak "app is required" };
 
 # The stash is used to pass values from one route to another
 attr stash => sub { {} };
@@ -42,7 +42,7 @@ sub param {
     my $self = shift;
 
     if ( $self->is_json ) {
-        croak "No JSON decoder" unless $self->app->can('json');
+        die "No JSON decoder" unless $self->app->can('json');
         my $hash = try {
             $self->app->json->decode( $self->content );
         }
@@ -57,15 +57,21 @@ sub param {
 }
 
 sub session {
-    my $self = shift;
-    if ( !@_ ) {
-        return $self->env->{'psgix.session'}
-          // croak "No Session middleware wrapped";
+    my $self    = shift;
+    my $session = $self->env->{'psgix.session'}
+      // die "No Session middleware wrapped";
+
+    return $session if !@_;
+
+    if ( @_ == 1 ) {
+        my $value = shift;
+        return $session->{$value} unless ref $value;
+        return $self->env->{'psgix.session'} = $value;
     }
-    return $self->session->{ $_[0] } if @_ == 1;
+
     my %hash = @_;
-    $self->session->{$_} = $hash{$_} for keys %hash;
-    return \%hash;
+    $session->{$_} = $hash{$_} for keys %hash;
+    return $session;
 }
 
 1;
@@ -95,7 +101,21 @@ A reference to the Kelp application.
 
 =head2 stash
 
-An all use, utility hash to use to pass information between routes.
+Returns a hashref, which represents the stash of the current the request
+
+An all use, utility hash to use to pass information between routes. The stash
+is a concept originally conceived by the developers of L<Catalyst>. It's a hash
+that you can use to pass data from one route to another.
+
+    # put value into stash
+    $self->req->stash->{username} = app->authenticate();
+    # more convenient way
+    $self->stash->{username} = app->authenticate();
+
+    # get value from stash
+    return "Hello " . $self->req->stash->{username};
+    # more convenient way
+    return "Hello " . $self->stash('username');
 
 =head2 named
 
@@ -150,36 +170,53 @@ to use L<Plack::Middleware::ReverseProxy>.
     # app.psgi
 
     builder {
-        enable_if { $_[0]->{REMOTE_ADDR} =~ /127\.0\.0\.1/ }
+        enable_if { ! $_[0]->{REMOTE_ADDR} || $_[0]->{REMOTE_ADDR} =~ /127\.0\.0\.1/ }
         "Plack::Middleware::ReverseProxy";
         $app->run;
     };
+
+(REMOTE_ADDR is not set at all when using the proxy via filesocket).
 
 =head2 session
 
 Returns the Plack session hash or dies if no C<Session> middleware was included.
 
-    sub route_zero {
+    sub get_session_value {
         my $self = shift;
         $self->session->{user} = 45;
     }
 
 If called with a single argument, returns that value from the session hash:
 
-    sub route_one {
+    sub set_session_value {
         my $self = shift;
         my $user = $self->req->session('user');
+        # Same as $self->req->session->{'user'};
     }
 
 Set values in the session using key-value pairs:
 
-    sub route_two {
+    sub set_session_hash {
         my $self = shift;
         $self->req->session(
             name  => 'Jill Andrews',
             age   => 24,
             email => 'jill@perlkelp.com'
         );
+    }
+
+Set values using a Hashref:
+
+    sub set_session_hashref {
+        my $self = shift;
+        $self->req->session( { bar => 'foo' } );
+    }
+
+Clear the session:
+
+    sub clear_session {
+        my $self = shift;
+        $self->req->session( {} );
     }
 
 =head3 Common tasks with sessions
@@ -199,7 +236,7 @@ In your config file:
 
 =cut
 
-=item Delete session values
+=item Delete session value
 
     delete $self->req->session->{'useless'};
 
@@ -207,7 +244,7 @@ In your config file:
 
 =item Remove all session values
 
-    $self->req->session = {};
+    $self->req->session( {} );
 
 =cut
 

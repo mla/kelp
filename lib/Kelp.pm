@@ -2,23 +2,24 @@ package Kelp;
 
 use Kelp::Base;
 
-use Carp 'longmess';
+use Carp qw/ longmess croak /;
 use FindBin;
 use Encode;
 use Try::Tiny;
 use Data::Dumper;
 use Sys::Hostname;
 use Plack::Util;
-use Kelp::Request;
-use Kelp::Response;
 
-our $VERSION = 0.4602;
+our $VERSION = 0.9051;
 
 # Basic attributes
 attr -host => hostname;
 attr  mode => $ENV{KELP_ENV} // $ENV{PLACK_ENV} // 'development';
 attr -path => $FindBin::Bin;
 attr -name => sub { ( ref( $_[0] ) =~ /(\w+)$/ ) ? $1 : 'Noname' };
+attr  request_obj  => 'Kelp::Request';
+attr  response_obj => 'Kelp::Response';
+
 
 # Debug
 attr long_error => $ENV{KELP_LONG_ERROR} // 0;
@@ -28,7 +29,13 @@ attr -charset => sub {
     $_[0]->config("charset") // 'UTF-8';
 };
 
+# Name the config module
 attr config_module => 'Config';
+
+# Undocumented.
+# Used to unlock the undocumented features of the Config module.
+attr __config => undef;
+
 attr -loaded_modules => sub { {} };
 
 # Each route's request an response objects will
@@ -40,9 +47,9 @@ attr res => undef;
 sub new {
     my $self = shift->SUPER::new(@_);
 
-    # Always load these modules
-    $self->load_module( $self->config_module );
-    $self->load_module('Routes');
+    # Always load these modules, but allow client to override
+    $self->_load_config();
+    $self->_load_routes();
 
     # Load the modules from the config
     if ( defined( my $modules = $self->config('modules') ) ) {
@@ -51,6 +58,26 @@ sub new {
 
     $self->build();
     return $self;
+}
+
+sub _load_config {
+    my $self = shift;
+    $self->load_module( $self->config_module, extra => $self->__config );
+}
+
+sub _load_routes {
+    my $self = shift;
+    $self->load_module('Routes');
+}
+
+# Create a shallow copy of the app, optionally blessed into a
+# different subclass.
+sub _clone {
+    my $self = shift;
+    my $subclass = shift || ref($self);
+
+    ref $self or croak '_clone requires instance';
+    return bless { %$self }, $subclass;
 }
 
 sub load_module {
@@ -84,15 +111,19 @@ sub build {
 }
 
 # Override to use a custom request object
-sub request {
+sub build_request {
     my ( $self, $env ) = @_;
-    return Kelp::Request->new( app => $self, env => $env );
+    my $package = $self->request_obj;
+    eval qq{require $package};
+    return $package->new( app => $self, env => $env);
 }
 
 # Override to use a custom response object
-sub response {
+sub build_response {
     my $self = shift;
-    return Kelp::Response->new( app => $self );
+    my $package = $self->response_obj;
+    eval qq{require $package};
+    return $package->new( app => $self );
 }
 
 # Override to manipulate the end response
@@ -111,7 +142,9 @@ sub run {
         for my $class (@$middleware) {
 
             # Make sure the middleware was not already loaded
-            next if $self->{_loaded_middleware}->{$class}++;
+            # This does not apply for testing, in which case we want
+            # the middleware to wrap every single time
+            next if $self->{_loaded_middleware}->{$class}++ && !$ENV{KELP_TESTING};
 
             my $mw = Plack::Util::load_class($class, 'Plack::Middleware');
             my $args = $self->config("middleware_init.$class") // {};
@@ -126,8 +159,8 @@ sub psgi {
     my ( $self, $env ) = @_;
 
     # Create the request and response objects
-    my $req = $self->req( $self->request($env) );
-    my $res = $self->res( $self->response );
+    my $req = $self->req( $self->build_request($env) );
+    my $res = $self->res( $self->build_response );
 
     # Get route matches
     my $match = $self->routes->match( $req->path, $req->method );
@@ -144,14 +177,15 @@ sub psgi {
         for my $route (@$match) {
 
             # Dispatch
+            $self->req->named( $route->named );
             my $data = $self->routes->dispatch( $self, $route );
 
             # Log info about the route
             if ( $self->can('logger') ) {
-                $self->logger(
-                    'info',
+                $self->info(
                     sprintf( "%s - %s %s - %s",
-                        $req->address, $req->method, $req->path, $route->to )
+                        $req->address, $req->method,
+                        $req->path,    $route->to )
                 );
             }
 
@@ -174,11 +208,18 @@ sub psgi {
             }
         }
 
-        # If nothing got rendered, die with error
+        # If nothing got rendered
         if ( !$self->res->rendered ) {
-            die $match->[-1]->to
+            # render 404 if only briges matched
+            if ( $match->[-1]->bridge ) {
+                $res->render_404;
+            }
+            # or die with error
+            else {
+              die $match->[-1]->to
               . " did not render for method "
               . $req->method;
+            }
         }
 
         $self->finalize;
@@ -190,7 +231,7 @@ sub psgi {
         $self->logger( 'critical', $message ) if $self->can('logger');
 
         # Render 500
-        $self->res->render_500($message);
+        $self->res->render_500($_);
         $self->finalize;
     };
 }
@@ -347,8 +388,7 @@ or any decoder of your choice.
 =item
 
 B<Extendable Core>. Kelp uses pluggable modules for everything. This allows
-anyone to add a module for a custom interface. Writing Kelp modules is a
-pleasant and fulfilling activity.
+anyone to add a module for a custom interface. Writing Kelp modules is easy.
 
 =cut
 
@@ -475,7 +515,7 @@ units for your web app.
 This is the L<PSGI> file, of the app, which you will deploy. In it's most basic
 form it should look like this:
 
-    use lib '../lib';
+    use lib './lib';
     use MyApp;
 
     my $app = MyApp->new;
@@ -668,6 +708,56 @@ the necessary arguments.
 
     my $url = $self->route->url('update', id => 1000); # /update/1000
 
+=head2 Reblessing the app into a controller class
+
+All of the examples here show routes which take an instance of the web
+application as a first parameter. This is true even if those routes live in
+another class. To rebless the app instance into the controller class instance,
+use the custom router class L<Kelp::Routes::Controller>.
+
+=head3 Step 1: Specify the custom router class in the config
+
+    # config.pl
+    {
+        modules_init => {
+            Routes => {
+                router => 'Controller'
+            }
+        }
+    }
+
+=head3 Step 2: Create a main controller class
+
+This class must inherit from Kelp.
+
+    # lib/MyApp/Controller.pm
+    package MyApp::Controller;
+    use Kelp::Base 'MyApp';
+
+    # Now $self is an instance of 'MyApp::Controller';
+    sub service_method {
+        my $self = shift;
+        ...;
+    }
+
+    1;
+
+=head3 Step 3: Create any number of controller classes
+
+They all must inherit from your main controller class.
+
+    # lib/MyApp/Controller/Users.pm
+    package MyApp::Controller::Users;
+    use Kelp::Base 'MyApp::Controller';
+
+    # Now $self is an instance of 'MyApp::Controller::Users'
+    sub authenticate {
+        my $self = shift;
+        ...;
+    }
+
+    1;
+
 =head2 Quick development using Kelp::Less
 
 For writing quick experimental web apps and to reduce the boiler plate, one
@@ -738,7 +828,8 @@ returned app.
     sub run {
         my $self = shift;
         my $app = $self->SUPER::run(@_);
-        Plack::Middleware::ContentLength->wrap($app);
+        $app = Plack::Middleware::ContentLength->wrap($app);
+        return $app;
     }
 
 Note that any middleware defined in your config file will be added first.
@@ -806,7 +897,7 @@ At this point we are ready to send requests to the app via the
 L<request|Kelp::Test/request> method. It takes only one argument, an
 HTTP::Request object. It is very convenient to use the L<HTTP::Request::Common>
 module here, because you can create common requests using abridged syntax,
-i.e. C<GET>, C<POST>, etc.  The line C<$t-E<gt>request( GET '/path' )> fist
+i.e. C<GET>, C<POST>, etc.  The line C<$t-E<gt>request( GET '/path' )> first
 creates a HTTP::Request GET object, and then passes it to the C<request> method.
 
 =cut
@@ -996,7 +1087,7 @@ If we instruct our web application to load the C<JSON> module, it will have a
 new method C<json> which will be a link to the C<JSON> object initialized in the
 module.
 
-See more exampled and POD at L<Kelp::Module>.
+See more examples and POD at L<Kelp::Module>.
 
 =head3 How to load modules using the config
 
@@ -1033,6 +1124,16 @@ L<Kelp::Module::Config> for more information.
     # conf/config.pl and conf/development.pl are merged with priority
     # given to the second one.
 
+=head2 request_obj
+
+Proide a custom package name to define the global ::Request object. Defaults to
+L<Kelp::Request>.
+
+=head2 response_obj
+
+Proide a custom package name to define the global ::Response object. Defaults to
+L<Kelp::Response>.
+
 =head2 config_module
 
 Sets of gets the class of the configuration module to be loaded on startup. The
@@ -1051,8 +1152,8 @@ the C<loaded_modules> hash will look like this:
         JSON     => Kelp::Module::JSON=HASH(0x209d454)
     }
 
-This can come handy if your module does more than just registering a new method
-into the application. Then, you can use its object instance to do access that
+This can come in handy if your module does more than just registering a new method
+into the application. Then, you can use its object instance to access that
 additional functionality.
 
 
@@ -1075,7 +1176,7 @@ anything else. The charset could also be changed in the config files.
 =head2 long_error
 
 When a route dies, Kelp will by default display a short error message. Set this
-attribute to a true value, if you need to see a full stack trace of the error.
+attribute to a true value if you need to see a full stack trace of the error.
 The C<KELP_LONG_ERROR> environment variable can also set this attribute.
 
 =head2 req
@@ -1104,7 +1205,7 @@ contain a reference to the current L<Kelp::Response> instance.
 
 =head2 build
 
-On it's own the C<build> method doesn't do anything. It is called by the
+On its own, the C<build> method doesn't do anything. It is called by the
 constructor, so it can be overridden to add route destinations and
 initializations.
 
@@ -1135,29 +1236,32 @@ namespace.
     # Will look for and load Kelp::Module::Redis
 
 Options for the module may be specified after its name, or in the
-C<modules_init> hash in the config. The precedence is given to the
+C<modules_init> hash in the config. Precedence is given to the
 inline options.
 See L<Kelp::Module> for more information on making and using modules.
 
-=head2 request
+=head2 build_request
 
 This method is used to create the request object for each HTTP request. It
-returns an instance of L<Kelp::Request>, initialized with the current request's
-environment. You can override this method to use a custom request module.
+returns an instance of the class defined in the request_obj attribute (defaults to
+L<Kelp::Request>), initialized with the current request's environment. You can
+override this method to use a custom request module if you need to do something
+interesting. Though there is a provided attribute that can be used to overide
+the class of the object used. 
 
     package MyApp;
     use MyApp::Request;
 
-    sub request {
+    sub build_request {
         my ( $self, $env ) = @_;
-        return MyApp::Requst->new( app => $app, env => $env );
+        return MyApp::Request->new( app => $app, env => $env );
     }
 
     # Now each request will be handled by MyApp::Request
 
 =head2 before_finalize
 
-Override this method, to modify the response object just before it gets
+Override this method to modify the response object just before it gets
 finalized.
 
     package MyApp;
@@ -1172,11 +1276,13 @@ finalized.
 The above is an example of how to insert a custom header into the response of
 every route.
 
-=head2 response
+=head2 build_response
 
 This method creates the response object, e.g. what an HTTP request will return.
-By default the object created is L<Kelp::Response>. Much like L</request>, the
-response can also be overridden to use a custom response object.
+By default the object created is L<Kelp::Response> though this can be
+overwritten via the respone_obj attribute. Much like L</build_request>, the
+response can also be overridden to use a custom response object if you need
+something completely custom.
 
 =head2 run
 
@@ -1249,7 +1355,7 @@ Stefan Geneshky - minimal <at> cpan.org
 
 =head1 CONTRIBUTORS
 
-Ruslan Zakirov
+In no particular order:
 
 Julio Fraire
 
@@ -1258,6 +1364,16 @@ Maurice Aubrey
 David Steinbrunner
 
 Gurunandan Bhat
+
+Perlover
+
+Ruslan Zakirov
+
+Christian Froemmel (senfomat)
+
+Ivan Baidakou (basiliscos)
+
+roy-tate
 
 =head1 LICENSE
 

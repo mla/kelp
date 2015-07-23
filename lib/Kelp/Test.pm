@@ -8,6 +8,7 @@ use Test::Deep;
 use Carp;
 use Encode ();
 use HTTP::Cookies;
+use Try::Tiny;
 
 BEGIN {
     $ENV{KELP_TESTING} = 1;    # Set the ENV for testing
@@ -23,10 +24,6 @@ attr -app => sub {
 };
 
 attr res  => sub { die "res is not initialized" };
-
-attr -run => sub {
-    $_[0]->app->run;
-};
 
 attr cookies => sub { HTTP::Cookies->new };
 
@@ -50,7 +47,7 @@ sub request {
     # Add the current cookie to the request headers
     $self->cookies->add_cookie_header($req);
 
-    my $res = test_psgi( $self->run, sub { shift->($req) } );
+    my $res = test_psgi( $self->app->run, sub { shift->($req) } );
 
     # Extract the cookies from the response and add them to the cookie jar
     $self->cookies->extract_cookies($res);
@@ -60,11 +57,16 @@ sub request {
 }
 
 sub request_ok {
-    shift->request(@_)->code_is(200);
+    my ( $self, $req, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
+    $self->request($req)->code_is( 200, $test_name );
 }
 
 sub code_is {
     my ( $self, $code, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Response code is $code";
     is $self->res->code, $code, $test_name;
 
@@ -78,6 +80,8 @@ sub code_is {
 
 sub code_isnt {
     my ( $self, $code, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Response code is not $code";
     isnt $self->res->code, $code, $test_name;
     return $self;
@@ -85,6 +89,8 @@ sub code_isnt {
 
 sub content_is {
     my ( $self, $value, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Content is '$value'";
     is Encode::decode( $self->app->charset, $self->res->content ), $value,
       $test_name;
@@ -93,6 +99,8 @@ sub content_is {
 
 sub content_isnt {
     my ( $self, $value, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Content is not '$value'";
     isnt Encode::decode( $self->app->charset, $self->res->content ), $value,
       $test_name;
@@ -101,6 +109,8 @@ sub content_isnt {
 
 sub content_like {
     my ( $self, $regexp, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Content matches $regexp";
     like Encode::decode( $self->app->charset, $self->res->content ), $regexp,
       $test_name;
@@ -109,6 +119,8 @@ sub content_like {
 
 sub content_unlike {
     my ( $self, $regexp, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Content does not match $regexp";
     unlike Encode::decode( $self->app->charset, $self->res->content ), $regexp,
       $test_name;
@@ -117,6 +129,8 @@ sub content_unlike {
 
 sub content_type_is {
     my ( $self, $value, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Content-Type is '$value'";
     is $self->res->content_type, $value, $test_name;
     return $self;
@@ -124,6 +138,8 @@ sub content_type_is {
 
 sub content_type_isnt {
     my ( $self, $value, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Content-Type is not '$value'";
     isnt $self->res->content_type, $value, $test_name;
     return $self;
@@ -131,6 +147,8 @@ sub content_type_isnt {
 
 sub header_is {
     my ( $self, $header, $value, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Header '$header' => '$value'";
     is $self->res->header($header), $value, $test_name
       || $self->diag_headers();
@@ -139,6 +157,8 @@ sub header_is {
 
 sub header_isnt {
     my ( $self, $header, $value, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Header '$header' is not '$value'";
     isnt $self->res->header($header), $value, $test_name
       || $self->diag_headers();
@@ -147,6 +167,8 @@ sub header_isnt {
 
 sub header_like {
     my ( $self, $header, $regexp, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Header '$header' =~ $regexp";
     like $self->res->header($header), $regexp, $test_name
       || $self->diag_headers();
@@ -155,19 +177,35 @@ sub header_like {
 
 sub header_unlike {
     my ( $self, $header, $regexp, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "Header '$header' !~ $regexp";
     unlike $self->res->header($header), $regexp, $test_name
       || $self->diag_headers();
     return $self;
 }
 
+sub json_content {
+    my $self = shift;
+    fail "No JSON decoder" unless $self->app->can('json');
+    my $result;
+    try {
+        $result = $self->app->json->decode( $self->res->content );
+    }
+    catch {
+        fail("Poorly formatted JSON");
+    };
+    return $result;
+}
+
 sub json_cmp {
     my ( $self, $expected, $test_name ) = @_;
+    local $Test::Builder::Level = $Test::Builder::Level + 1;
+
     $test_name ||= "JSON structure matches";
-    fail "No JSON decoder" unless $self->app->can('json');
     like $self->res->header('content-type'), qr/json/, 'Content-Type is JSON'
       or return $self;
-    my $json = $self->app->json->decode( $self->res->content );
+    my $json = $self->json_content;
     cmp_deeply( $json, $expected, $test_name ) or diag explain $json;
     return $self;
 }
@@ -246,7 +284,7 @@ From this point on, all requests run with C<$t-E<gt>request> will be sent to C<$
 
 =head2 res
 
-Each time C<$t->request> is used to send a request, an HTTP::Response object is
+Each time C<$t-E<gt>request> is used to send a request, an HTTP::Response object is
 returned and saved in the C<res> attribute. You can use it to run tests,
 although as you will see, this module provides methods which make this a lot
 easier. It is recommended that you use the convenience methods rather than using
@@ -257,7 +295,7 @@ C<res>.
 
 =head2 cookies
 
-Ac L<HTTP::Cookies> object containing the cookie jar for all tests.
+An L<HTTP::Cookies> object containing the cookie jar for all tests.
 
 =head1 METHODS
 
@@ -274,6 +312,16 @@ you can take advantage of the simplified syntax for creating an HTTP request.
     $t->request( POST '/api', [ user => 'jane' ] );
 
 This method returns C<$self>, so other methods can be chained after it.
+
+=head2 request_ok
+
+C<request_ok( $http_request, $test_name )>
+
+Runs C<request>, then tests if the response code is 200. Equivalent to the following
+code:
+
+    $t->request( GET '/path' )->code_is(200);
+    $t->request_ok( GET '/path' );    # Same as the above
 
 =head2 code_is, code_isnt
 

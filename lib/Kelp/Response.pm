@@ -5,8 +5,9 @@ use Kelp::Base 'Plack::Response';
 use Encode;
 use Carp;
 use Try::Tiny;
+use Scalar::Util;
 
-attr -app => sub { confess "app is required" };
+attr -app => sub { croak "app is required" };
 attr rendered => 0;
 attr partial  => 0;
 
@@ -80,11 +81,11 @@ sub render {
 
     # If the content has been determined as JSON, then encode it
     if ( $self->content_type eq 'application/json' ) {
-        confess "No JSON decoder" unless $self->app->can('json');
-        confess "Data must be a reference" unless ref($body);
+        die "No JSON decoder" unless $self->app->can('json');
+        die "Data must be a reference" unless ref($body);
         my $json = $self->app->json;
         $body = $json->encode($body);
-        $body = encode('UTF-8', $body) unless $json->get_utf8;
+        $body = encode($self->app->charset, $body) unless $json->get_utf8;
         $self->body( $body );
     } else {
         $self->body( encode( $self->app->charset, $body ) );
@@ -102,7 +103,7 @@ sub render_binary {
     $self->set_code(200) unless $self->code;
 
     if ( !$self->content_type ) {
-        confess "Content-type must be explicitly set for binaries";
+        die "Content-type must be explicitly set for binaries";
     }
 
     $self->body($body);
@@ -120,6 +121,7 @@ sub render_error {
 
     # Look for a template and if not found, then show a generic text
     try {
+        local $SIG{__DIE__};  # Silence StackTrace
         my $filename = "error/$code";
         $self->template(
             $filename, {
@@ -140,21 +142,26 @@ sub render_404 {
 }
 
 sub render_500 {
-    my ( $self, $message ) = @_;
-    if ( $self->app->mode ne 'deployment' ) {
-        if ($message) {
-            return $self->set_code(500)->render($message);
-        }
-        else {
-            local $SIG{__DIE__};    # Silence StackTrace
-            return $self->render_error( 500, $message );
-        }
+    my ( $self, $error ) = @_;
+
+    if ( !defined $error || $self->app->mode eq 'deployment' ) {
+        return $self->render_error;
     }
-    $self->render_error;
+
+    # if render_500 gets blessed object as error stringify it
+    $error = ref $error if Scalar::Util::blessed $error;
+    
+    return $self->set_code(500)->render($error);
 }
 
 sub render_401 {
     $_[0]->render_error( 401, "Unauthorized" );
+}
+
+sub redirect {
+    my $self = shift;
+    $self->rendered(1);
+    $self->SUPER::redirect(@_);
 }
 
 sub redirect_to {
@@ -170,7 +177,7 @@ sub template {
     $vars->{app} = $self->app;
 
     # Do we have a template module loaded?
-    croak "No template module loaded"
+    die "No template module loaded"
       unless $self->app->can('template');
 
     my $output = $self->app->template( $template, $vars, @rest );
@@ -354,6 +361,11 @@ before that.
     get '/image/:name' => sub {
         my $content = File::Slurp::read_file("$name.jpg");
         res->set_content_type('image/jpeg')->render_binary( $content );
+
+        # the same, but probably more effective way (PSGI-server dependent)
+        open( my $handle, "<:raw", "$name.png" )
+            or die("cannot open $name: $!");
+        res->set_content_type('image/png')->render_binary( $handle );
     };
 
 =head2 render_error

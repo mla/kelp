@@ -68,7 +68,8 @@ sub _parse_route {
 
     # Format destination
     if ( !ref $val->{to} ) {
-        $val->{to} = _camelize( $val->{to}, $self->base );
+        my $sigil = defined $val->{to} && $val->{to} =~ s/^(\+)// ? $1 : undef;
+        $val->{to} = _camelize( $val->{to}, $sigil ? undef : $self->base );
 
         # Load the class, if there is one and it is not 'main'
         if (   defined $val->{to}
@@ -85,7 +86,7 @@ sub _parse_route {
         if ( !grep { $method eq $_ } qw/GET POST PUT DELETE/ ) {
             carp "Using an odd method: $method";
         }
-        $val->{via} = $method;
+        $val->{method} = $method;
         $key = $pattern;
     }
 
@@ -136,7 +137,7 @@ sub _parse_route {
 
 sub url {
     my $self = shift;
-    my $name = shift // croak "Route name is missing";
+    my $name = shift // die "Route name is missing";
     my %args = @_ == 1 ? %{ $_[0] } : @_;
 
     return $name unless exists $self->names->{$name};
@@ -191,7 +192,6 @@ sub dispatch {
         $to = \&{$to};
     }
 
-    $req->named( $route->named );
     return $to->( $app, @{ $route->param } );
 }
 
@@ -476,8 +476,8 @@ This will prepend C<MyApp::> to all route destinations.
     $r->add( '/view' => 'User::view' );    # /view -> MyApp::User::view
 
 A Kelp application will automatically set this value to the name of the main
-class. If you need to use a route located in another package, you'll have to
-wrap it in a local sub:
+class. If you need to use a route located in another package, you must prefix
+it with a plus sign:
 
     # Problem:
 
@@ -487,11 +487,8 @@ wrap it in a local sub:
 
     # Solution:
 
-    $r->add( '/outside' => 'outside' );
-    ...
-    sub outside {
-        return Outside::Module::route;
-    }
+    $r->add( '/outside' => '+Outside::Module::route' );
+    # /outside -> Outside::Module::route
 
 =head2 cache
 
@@ -560,8 +557,8 @@ A hashref with options.
     # GET /item/100 -> MyApp::Items::view
     $r->add(
         '/item/:id', {
-            to  => 'items#view',
-            via => 'GET'
+            to     => 'items#view',
+            method => 'GET'
         }
     );
 
@@ -581,20 +578,20 @@ if you specify a hashref for a destination:
 Sets the destination for the route. It should be a subroutine name or CODE
 reference.
 
-    $r->add( '/user' => { to => 'users#home' } ); # /home -> MyApp::Users::home
+    $r->add( '/home' => { to => 'users#home' } ); # /home -> MyApp::Users::home
     $r->add( '/sys' => { to => sub { ... } });    # /sys -> execute code
     $r->add( '/item' => { to => 'Items::handle' } ) ;   # /item -> MyApp::Items::handle
-    $r->add( '/item' => { to => 'Items::handle' } );    # Same as above
+    $r->add( '/item' => { to => 'items#handle' } );    # Same as above
 
-=head4 via
+=head4 method
 
 Specifies an HTTP method to be considered by L</match> when matching a route.
 
     # POST /item -> MyApp::Items::add
     $r->add(
         '/item' => {
-            via => 'POST',
-            to  => 'items#add'
+            method => 'POST',
+            to     => 'items#add'
         }
     );
 
@@ -675,6 +672,15 @@ L<Kelp::Routes::Pattern/param>.
 Routes that used regular expressions instead of patterns will only initialize
 the C<param> array with the regex captures, unless those patterns are using
 named captures in which case the C<named> hash will also be initialized.
+
+=head1 EXTENDING
+
+This is the default router class for each new Kelp application, but it doesn't
+have to be. You can create your own subclass that better suits your needs. It's
+generally enough to override the L</dispatch> method.
+
+Kelp comes with L<Kelp::Routes::Controller>, a router extension which reblesses
+the application instance into a controller class.
 
 =head1 ACKNOWLEDGEMENTS
 

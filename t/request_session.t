@@ -3,14 +3,12 @@ use Kelp::Test;
 use Kelp;
 use Test::More;
 use HTTP::Request::Common;
-use FindBin '$Bin';
 use Plack::Middleware::Session;
 
-BEGIN {
-    $ENV{KELP_CONFIG_DIR} = "$Bin/conf/session";
-}
-
-my $app = Kelp->new( mode => 'test' );
+my $app = Kelp->new(
+    mode     => 'test',
+    __config => { middleware => ['Session'] }
+);
 my $t = Kelp::Test->new( app => $app );
 
 #ok $app->can('session');
@@ -39,9 +37,15 @@ $app->add_route( '/session', sub {
         faa => 'taa'
       };
 
-    $r->session = {};
-    is_deeply $r->session, $s;
+    $r->session({});
+    is_deeply $r->session, {};
+    is_deeply $r->env->{'psgix.session'}, {};
+
+    return 'All OK';
 });
-$t->request( GET '/session' );
+
+$t->request( GET '/session' )
+    ->code_is(200)
+    ->content_is('All OK');
 
 done_testing;

@@ -99,12 +99,21 @@ sub load {
     my $text = do { local $/ = undef; <$in> };
     close($in);
 
-    my $_eval = sub {
+    my ( $hash, $error );
+    {
         local $@;
-        return (eval shift, $@);
-    };
+        my $app = $self->app;
+        my $module = $filename;
+        $module =~ s/\W/_/g;
+        $hash =
+            eval "package Kelp::Module::Config::Sandbox::$module;"
+          . "use Kelp::Base -strict;"
+          . "sub app; local *app = sub { \$app };"
+          . "sub include(\$); local *include = sub { \$self->load(\@_) };"
+          . $text;
+        $error = $@;
+    }
 
-    my ( $hash, $error ) = $_eval->( $text );
     die "Config file $filename parse error: " . $error if $error;
     die "Config file $filename did not return a HASH - $hash"
       unless ref $hash eq 'HASH';
@@ -112,48 +121,79 @@ sub load {
     return $hash;
 }
 
-sub build {
-    my ( $self, %args ) = @_;
+sub process_mode {
+    my ( $self, $mode ) = @_;
 
-    # Get an easy access reference to the data
-    my $data_ref = $self->data;
-
-    # Create a private sub that searches for a file in all the paths
-    # specified in $self->path
-    my $find = sub {
-        my $name = shift;
+    my $filename =  sub {
         my @paths = ref( $self->path ) ? @{ $self->path } : ( $self->path );
         for my $path (@paths) {
             next unless defined $path;
-            my $filename = sprintf( '%s/%s.%s', $path, $name, $self->ext );
+            my $filename = sprintf( '%s/%s.%s', $path, $mode, $self->ext );
             return $filename if -r $filename;
         }
-    };
+    }->();
 
-    # Create a private sub that parses a config file
-    my $process = sub {
-        my $name   = shift;
-        my $parsed = {};
-        try {
-            $parsed = $self->load($name);
+    unless ( $filename ) {
+        if ( $ENV{KELP_CONFIG_WARN} ) {
+            my $message =
+              $mode eq 'config'
+              ? "Main config file not found or not readable"
+              : "Config file for mode '$mode' not found or not readable";
+            warn $message;
         }
-        catch {
-            croak "Parsing $name died with error: '${_}'";
-        };
-        $data_ref = _merge( $data_ref, $parsed );
-    };
-
-    # Find, parse and merge 'config' and mode files
-    for ( 'config', $self->app->mode ) {
-        if ( my $filename = $find->($_) ) {
-            $process->($filename);
-        }
+        return;
     }
 
-    # Register two methods: config and config_hash
+    my $parsed = {};
+    try {
+        $parsed = $self->load($filename);
+    }
+    catch {
+        die "Parsing $filename died with error: '${_}'";
+    };
+    $self->data( _merge( $self->data, $parsed ) );
+}
+
+sub build {
+    my ( $self, %args ) = @_;
+
+    # Find, parse and merge 'config' and mode files
+    for my $name ( 'config', $self->app->mode ) {
+        $self->process_mode( $name );
+    }
+
+    # Undocumented! Add 'extra' argument to unlock these special features:
+    # 1. If the extra argument contains a HASH, it will be merged to the
+    #    configuration upon loading.
+    # 2. A new attribute '_cfg' will be registered into the app, which has
+    # three methods: merge, clear and set. Use them to merge a hash into
+    # the configuration, clear it, or set it to a new value. You can do those
+    # at any point in the life of the app.
+    #
+    if ( my $extra = delete $args{extra} ) {
+        $self->data( _merge( $self->data, $extra ) ) if ref($extra) eq 'HASH';
+        $self->register(
+
+         # A tiny object containing only merge, clear and set. Very useful when
+         # you're writing tests and need to add new config options, set the
+         # entire config hash to a new value, or clear it completely.
+            _cfg => Plack::Util::inline_object(
+                merge => sub {
+                    $self->data( _merge( $self->data, $_[0] ) );
+                },
+                clear => sub { $self->data( {} ) },
+                set   => sub { $self->data( $_[0] ) }
+            )
+        );
+    }
+
     $self->register(
+
+        # Return the entire config hash
         config_hash => $self->data,
-        config      => sub {
+
+        # A wrapper arount the get method
+        config => sub {
             my ( $app, $path ) = @_;
             return $self->get($path);
         }
@@ -215,32 +255,61 @@ Kelp::Module::Config - Configuration for Kelp applications
 =head1 DESCRIPTION
 
 This is one of the two modules that are automatically loaded for each and every
-Kelp application. It reads configuration files containing Perl-style hashes,
-and merges them depending on the value of the application's C<mode> attribute.
+Kelp application. The other one is L<Kelp::Module::Routes>. It reads
+configuration files containing Perl-style hashes, and merges them depending on
+the value of the application's C<mode> attribute.
 
-The main configuration file name is C<config.pl>, and it will be searched in the
-C<conf> and C<../conf> directories. You can also set the C<KELP_CONFIG_DIR> environmental
-variable with the path to the configuration files.
+The main configuration file name is C<config.pl>, and it will be searched in
+the C<conf> and C<../conf> directories. You can also set the C<KELP_CONFIG_DIR>
+environmental variable with the path to the configuration files.
 
 This module comes with some L<default values|/DEFAULTS>, so if there are no
-configuration files found, those values will be used.
-Any values from configuration files will add to or override the default values.
+configuration files found, those values will be used.  Any values from
+configuration files will add to or override the default values.
 
 =head1 ORDER
 
-First the module will look for C<conf/config.pl>, then for C<../conf/config.pl>.
-If found, they will be parsed and merged into the default values.
-The same order applies to the I<mode> file too, so if the application
-L<mode|Kelp/mode> is I<development>, then C<conf/development.pl> and
-C<../conf/development.pl> will be looked for. If found, they will also be merged
-to the config hash.
+First the module will look for C<conf/config.pl>, then for
+C<../conf/config.pl>.  If found, they will be parsed and merged into the
+default values.  The same order applies to the I<mode> file too, so if the
+application L<mode|Kelp/mode> is I<development>, then C<conf/development.pl>
+and C<../conf/development.pl> will be looked for. If found, they will also be
+merged to the config hash.
+
+=head1 ACCESSING THE APPLICATION
+
+The application instance can be accessed within the config files via the C<app>
+keyword.
+
+    {
+        bin_path => app->path . '/bin'
+    }
+
+=head1 INCLUDING FILES
+
+To include other config files, one may use the C<include> keyword.
+
+    # config.pl
+    {
+        modules_init => {
+            Template => include('conf/my_template.pl')
+        }
+    }
+
+    # my_template.pl
+    {
+        path => 'views/',
+        utf8 => 1
+    }
+
+Any config file may be included as long as it returns a hashref.
 
 =head1 MERGING
 
 The first configuration file this module will look for is C<config.pl>. This is
-where you should keep configuration options that apply to all running environments.
-The mode-specific configuration file will be merged to this config, and it will
-take priority. Merging is done as follows:
+where you should keep configuration options that apply to all running
+environments.  The mode-specific configuration file will be merged to this
+config, and it will take priority. Merging is done as follows:
 
 =over
 
@@ -344,6 +413,23 @@ A reference to the entire configuration hash.
 
 Using this or C<config> is entirely up to the application developer.
 
+=head3 _cfg
+
+A tiny object that contains only three methods - B<merge>, B<clear> and B<set>.
+It allows you to merge values to the config hash, clear it completely or
+set it to an entirely new value. This method comes handy when writing tests.
+
+    # Somewhere in a .t file
+    my $app = MyApp->new( mode => 'test' );
+
+    my %original_config = %{ $app->config_hash };
+    $app->_cfg->merge( { middleware => ['Foo'] } );
+
+    # Now you can test with middleware Foo added to the config
+
+    # Revert to the original configuration
+    $app->_cfg->set( \%original_config );
+
 =head1 ATTRIBUTES
 
 This module implements some attributes, which can be overridden by subclasses.
@@ -390,6 +476,19 @@ L</separator> attribute.
 C<load(filename)>
 
 Loads, and parses the file C<$filename> and returns a hash reference.
+
+=head2 process_mode
+
+C<process_mode($mode)>
+
+Finds the file (if it exists) corresponding to C<$mode>, parses it and merges
+it into the data. Useful, when you want to process and extra config file during
+the application initialization.
+
+    # lib/MyApp.pm
+    sub build {
+        $self->loaded_modules->{Config}->process_mode( 'more_config' );
+    }
 
 =head1 DEFAULTS
 
@@ -462,5 +561,15 @@ Since the config files are searched in both C<conf/> and C<../conf/>, you can
 use the same configuration set of files for your application and for your tests.
 Assuming the all of your test will reside in C<t/>, they should be able to load
 and find the config files at C<../conf/>.
+
+=head1 ENVIRONMENT VARIABLES
+
+=head2 KELP_CONFIG_WARN
+
+This module will not warn for missing config and mode files. It will
+silently load the default configuration hash. Set KELP_CONFIG_WARN to a
+true value to make this module warn about missing files.
+
+    $ KELP_CONFIG_WARN=1 plackup app.psgi
 
 =cut
